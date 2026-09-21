@@ -1,5 +1,4 @@
 import type { APIRoute } from "astro";
-import type { Message } from "../../lib/db";
 import { bus } from "../../lib/events";
 
 // The minimal server-sent-events (SSE) pattern: a long-lived streaming
@@ -7,8 +6,13 @@ import { bus } from "../../lib/events";
 // SSE is one-directional (server → browser) and plain HTTP, which makes it
 // the simplest live channel that works everywhere — reach for WebSockets
 // only when the client needs to push over the same connection.
+//
+// The client's reaction to a "selection" event is a full page reload (see
+// index.astro), so the payload itself isn't consumed — only that an event
+// arrives. This also keeps the deploy check in .github/workflows/checks.yml
+// green, which just confirms /api/events streams bytes.
 export const GET: APIRoute = () => {
-  let onMessage: (message: Message) => void;
+  let onSelection: () => void;
   let heartbeat: ReturnType<typeof setInterval>;
 
   const stream = new ReadableStream<string>({
@@ -18,14 +22,14 @@ export const GET: APIRoute = () => {
       // connection as idle
       controller.enqueue(": connected\n\n");
       heartbeat = setInterval(() => controller.enqueue(": ping\n\n"), 30_000);
-      onMessage = (message) => {
-        controller.enqueue(`data: ${JSON.stringify(message)}\n\n`);
+      onSelection = () => {
+        controller.enqueue(`data: changed\n\n`);
       };
-      bus.on("message", onMessage);
+      bus.on("selection", onSelection);
     },
     cancel() {
       clearInterval(heartbeat);
-      bus.off("message", onMessage);
+      bus.off("selection", onSelection);
     },
   });
 
