@@ -1,8 +1,41 @@
 ---
-import { listMessages } from "../lib/db";
+import { findConflicts, type SelectedSlot } from "../lib/conflicts";
+import { listClassOptions, listCourses, listSelections } from "../lib/db";
 import "../styles.css";
 
-const messages = listMessages();
+const courses = listCourses();
+const classOptions = listClassOptions();
+const selections = listSelections();
+
+const courseById = new Map(courses.map((c) => [c.id, c]));
+const optionById = new Map(classOptions.map((o) => [o.id, o]));
+const selectionByCourse = new Map(selections.map((s) => [s.courseId, s]));
+
+const formatTime = (minutes: number): string =>
+  `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+
+const selectedSlots: SelectedSlot[] = selections.map((s) => {
+  const option = optionById.get(s.classOptionId)!;
+  return { courseId: s.courseId, day: option.day, startMinutes: option.startMinutes, endMinutes: option.endMinutes };
+});
+const conflicts = findConflicts(selectedSlots);
+
+const courseViews = courses.map((course) => {
+  const options = classOptions.filter((o) => o.courseId === course.id);
+  const selection = selectionByCourse.get(course.id);
+  const conflictIds = conflicts.get(course.id) ?? [];
+  const conflictText =
+    conflictIds.length > 0
+      ? conflictIds
+          .map((id) => {
+            const otherCourse = courseById.get(id)!;
+            const otherOption = optionById.get(selectionByCourse.get(id)!.classOptionId)!;
+            return `${otherCourse.code} (${otherOption.day} ${formatTime(otherOption.startMinutes)}–${formatTime(otherOption.endMinutes)})`;
+          })
+          .join(", ")
+      : null;
+  return { course, options, selectedOptionId: selection?.classOptionId ?? null, conflictText };
+});
 ---
 
 <!doctype html>
@@ -10,44 +43,79 @@ const messages = listMessages();
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>COMP4020 prototype</title>
+    <title>ANU Timetable Planner</title>
   </head>
   <body>
     <nav aria-label="site">
-      <a href="/">Guestbook</a>
+      <a href="/">Planner</a>
       <a href="/readme/">About</a>
     </nav>
     <main>
-      <h1>Guestbook</h1>
+      <h1>ANU Timetable Planner</h1>
       <p>
-        A minimal full-stack starter: messages live in SQLite on the machine's
-        volume (state survives a reload and a redeploy), and new messages
-        appear in every open tab over a server-sent-events stream — open this
-        page twice and sign it in one. Replace all of this with your own
-        prototype.
+        Pick a tutorial or lab for each course and see straight away if two of
+        your picks clash. Selections are saved to SQLite, so they're still
+        here after a reload.
       </p>
-      <form method="post" action="/api/messages">
-        <label for="body">Leave a message</label>
-        <input id="body" name="body" required maxlength="500" />
-        <button>Sign</button>
-      </form>
-      <ul id="messages">
-        {messages.map((message) => <li>{message.body}</li>)}
-      </ul>
+      <p class="demo-notice">
+        <strong>Demo data:</strong> these are sample courses and class times
+        for this prototype, not official ANU timetable information.
+      </p>
+      {
+        courseViews.map(({ course, options, selectedOptionId, conflictText }) => (
+          <section aria-labelledby={`course-${course.id}-heading`}>
+            <h2 id={`course-${course.id}-heading`}>
+              {course.code} — {course.title}
+            </h2>
+            {conflictText && (
+              <p role="status" class="conflict">
+                ⚠ Conflicts with {conflictText}
+              </p>
+            )}
+            <form method="post" action="/api/selections">
+              <input type="hidden" name="courseId" value={course.id} />
+              <fieldset>
+                <legend>Choose a class for {course.code}</legend>
+                {options.map((option) => (
+                  <div class="option">
+                    <input
+                      type="radio"
+                      id={`option-${option.id}`}
+                      name="classOptionId"
+                      value={option.id}
+                      checked={option.id === selectedOptionId}
+                    />
+                    <label for={`option-${option.id}`}>
+                      {option.type === "lab" ? "Lab" : "Tutorial"} — {option.label}: {option.day}{" "}
+                      {formatTime(option.startMinutes)}–{formatTime(option.endMinutes)}
+                      {option.location ? ` · ${option.location}` : ""}
+                    </label>
+                  </div>
+                ))}
+              </fieldset>
+              <button>
+                Select<span class="sr-only"> class for {course.code}</span>
+              </button>
+            </form>
+            {selectedOptionId && (
+              <form method="post" action="/api/selections/remove">
+                <input type="hidden" name="courseId" value={course.id} />
+                <button>
+                  Remove<span class="sr-only"> selection for {course.code}</span>
+                </button>
+              </form>
+            )}
+          </section>
+        ))
+      }
     </main>
     <script>
-      // The live half of the demo: subscribe to the SSE stream and prepend
-      // messages as they arrive. The form itself needs none of this — its
-      // POST + redirect re-renders the submitting tab from SQLite; this
-      // stream is how every other tab finds out.
-      const list = document.querySelector("#messages");
+      // Other open tabs hear about a select/change/remove over the SSE
+      // stream and reload to pick up the new saved state and conflict
+      // banners. The submitting tab already gets the fresh state from its
+      // own POST + redirect, so this only affects tabs that didn't act.
       const source = new EventSource("/api/events");
-      source.addEventListener("message", (event) => {
-        const message = JSON.parse(event.data);
-        const item = document.createElement("li");
-        item.textContent = message.body;
-        list?.prepend(item);
-      });
+      source.addEventListener("message", () => location.reload());
     </script>
   </body>
 </html>
