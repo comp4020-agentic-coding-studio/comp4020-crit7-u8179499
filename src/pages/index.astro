@@ -1,6 +1,15 @@
 ---
-import { findConflicts, type SelectedSlot } from "../lib/conflicts";
+import { findConflicts, slotsOverlap, type SelectedSlot } from "../lib/conflicts";
 import { listClassOptions, listCourses, listSelections } from "../lib/db";
+import {
+  DAY_LABELS,
+  GRID_START_MINUTES,
+  GRID_END_MINUTES,
+  WEEKDAYS,
+  layoutDay,
+  rowLine,
+  type Weekday,
+} from "../lib/timetable-layout";
 import "../styles.css";
 
 const courses = listCourses();
@@ -19,6 +28,35 @@ const selectedSlots: SelectedSlot[] = selections.map((s) => {
   return { courseId: s.courseId, day: option.day, startMinutes: option.startMinutes, endMinutes: option.endMinutes };
 });
 const conflicts = findConflicts(selectedSlots);
+const conflictPairCount = [...conflicts.values()].reduce((sum, others) => sum + others.length, 0) / 2;
+
+// The overlapping window (not either class's full slot) between each
+// conflicting pair, shown compactly next to the summary instead of inside
+// the narrow timetable blocks.
+interface ConflictPair {
+  aCode: string;
+  bCode: string;
+  day: Weekday;
+  startMinutes: number;
+  endMinutes: number;
+}
+
+const conflictPairs: ConflictPair[] = [];
+for (let i = 0; i < selectedSlots.length; i++) {
+  for (let j = i + 1; j < selectedSlots.length; j++) {
+    const a = selectedSlots[i];
+    const b = selectedSlots[j];
+    if (slotsOverlap(a, b)) {
+      conflictPairs.push({
+        aCode: courseById.get(a.courseId)!.code,
+        bCode: courseById.get(b.courseId)!.code,
+        day: a.day as Weekday,
+        startMinutes: Math.max(a.startMinutes, b.startMinutes),
+        endMinutes: Math.min(a.endMinutes, b.endMinutes),
+      });
+    }
+  }
+}
 
 const courseViews = courses.map((course) => {
   const options = classOptions.filter((o) => o.courseId === course.id);
@@ -36,6 +74,53 @@ const courseViews = courses.map((course) => {
       : null;
   return { course, options, selectedOptionId: selection?.classOptionId ?? null, conflictText };
 });
+
+// A colour per course, purely decorative — every block also carries the
+// course code and, on a clash, an explicit "⚠ Clash" label (the full
+// explanation lives in .conflict-details above the grid), so the block
+// never depends on colour alone to be understood.
+const courseColorIndex = new Map(courses.map((c, i) => [c.id, i % 6]));
+
+interface WeeklySlot {
+  courseId: number;
+  code: string;
+  label: string;
+  day: Weekday;
+  startMinutes: number;
+  endMinutes: number;
+  location: string | null;
+  hasConflict: boolean;
+}
+
+const conflictTextByCourse = new Map(courseViews.map((cv) => [cv.course.id, cv.conflictText]));
+
+const weeklySlots: WeeklySlot[] = selections
+  .filter((s) => (WEEKDAYS as readonly string[]).includes(optionById.get(s.classOptionId)!.day))
+  .map((s) => {
+    const option = optionById.get(s.classOptionId)!;
+    const course = courseById.get(s.courseId)!;
+    return {
+      courseId: s.courseId,
+      code: course.code,
+      label: option.label,
+      day: option.day as Weekday,
+      startMinutes: option.startMinutes,
+      endMinutes: option.endMinutes,
+      location: option.location,
+      hasConflict: conflictTextByCourse.get(s.courseId) != null,
+    };
+  });
+
+const positionedByDay = new Map(
+  WEEKDAYS.map((day) => [day, layoutDay(weeklySlots.filter((s) => s.day === day))]),
+);
+
+const hourMarks = Array.from(
+  { length: (GRID_END_MINUTES - GRID_START_MINUTES) / 60 + 1 },
+  (_, i) => GRID_START_MINUTES + i * 60,
+).map((minutes) => ({ row: rowLine(minutes), text: formatTime(minutes) }));
+
+const currentPath = Astro.url.pathname;
 ---
 
 <!doctype html>
@@ -46,68 +131,166 @@ const courseViews = courses.map((course) => {
     <title>ANU Timetable Planner</title>
   </head>
   <body>
-    <nav aria-label="site">
-      <a href="/">Planner</a>
-      <a href="/readme/">About</a>
-    </nav>
+    <header class="site-header">
+      <nav aria-label="site" class="site-nav">
+        <a href="/" aria-current={currentPath === "/" ? "page" : undefined}>Planner</a>
+        <a href="/readme/" aria-current={currentPath === "/readme/" ? "page" : undefined}>About</a>
+      </nav>
+    </header>
     <main>
       <h1>ANU Timetable Planner</h1>
-      <p>
-        Pick a tutorial or lab for each course and see straight away if two of
-        your picks clash. Selections are saved to SQLite, so they're still
-        here after a reload.
+      <p class="lede">
+        Pick a tutorial or lab for each course and see straight away if two of your picks clash.
+        Selections are saved to SQLite, so they're still here after a reload.
       </p>
       <p class="demo-notice">
-        <strong>Demo data:</strong> these are sample courses and class times
-        for this prototype, not official ANU timetable information.
+        <strong>Demo data:</strong> sample courses and class times for this prototype, not official
+        ANU timetable information.
       </p>
-      {
-        courseViews.map(({ course, options, selectedOptionId, conflictText }) => (
-          <section aria-labelledby={`course-${course.id}-heading`}>
-            <h2 id={`course-${course.id}-heading`}>
-              {course.code} — {course.title}
-            </h2>
-            {conflictText && (
-              <p role="status" class="conflict">
-                ⚠ Conflicts with {conflictText}
-              </p>
-            )}
-            <form method="post" action="/api/selections">
-              <input type="hidden" name="courseId" value={course.id} />
-              <fieldset>
-                <legend>Choose a class for {course.code}</legend>
-                {options.map((option) => (
-                  <div class="option">
-                    <input
-                      type="radio"
-                      id={`option-${option.id}`}
-                      name="classOptionId"
-                      value={option.id}
-                      checked={option.id === selectedOptionId}
-                    />
-                    <label for={`option-${option.id}`}>
-                      {option.type === "lab" ? "Lab" : "Tutorial"} — {option.label}: {option.day}{" "}
-                      {formatTime(option.startMinutes)}–{formatTime(option.endMinutes)}
-                      {option.location ? ` · ${option.location}` : ""}
-                    </label>
+
+      <section aria-labelledby="weekly-timetable-heading" class="weekly-timetable">
+        <h2 id="weekly-timetable-heading">My Weekly Timetable</h2>
+        <p class="summary-stats">
+          <span class="stat">
+            <strong>{selections.length}</strong> of {courses.length} courses selected
+          </span>
+          <span class={`stat ${conflictPairCount > 0 ? "stat-warning" : "stat-ok"}`}>
+            {conflictPairCount === 0
+              ? "No clashes"
+              : `${conflictPairCount} clash${conflictPairCount === 1 ? "" : "es"}`}
+          </span>
+        </p>
+
+        {
+          conflictPairs.length > 0 && (
+            <ul class="conflict-details" aria-label="Clash details">
+              {conflictPairs.map((pair) => (
+                <li>
+                  {pair.aCode} overlaps {pair.bCode} · {DAY_LABELS[pair.day]} {formatTime(pair.startMinutes)}–
+                  {formatTime(pair.endMinutes)}
+                </li>
+              ))}
+            </ul>
+          )
+        }
+
+        {
+          weeklySlots.length === 0 ? (
+            <p class="timetable-empty">No classes saved yet — choose a class below to see it appear here.</p>
+          ) : (
+            <div class="timetable-grid-wrapper">
+              <div class="timetable-grid">
+                <div class="grid-corner" aria-hidden="true" />
+                {WEEKDAYS.map((day, i) => (
+                  <div class="day-header" style={`grid-column:${i + 2}`}>
+                    {DAY_LABELS[day]}
                   </div>
                 ))}
-              </fieldset>
-              <button>
-                Select<span class="sr-only"> class for {course.code}</span>
-              </button>
-            </form>
-            {selectedOptionId && (
-              <form method="post" action="/api/selections/remove">
-                <input type="hidden" name="courseId" value={course.id} />
-                <button>
-                  Remove<span class="sr-only"> selection for {course.code}</span>
-                </button>
-              </form>
-            )}
-          </section>
-        ))
-      }
+                {hourMarks.map((mark) => (
+                  <div class="hour-label" style={`grid-row:${mark.row} / span 2`}>
+                    {mark.text}
+                  </div>
+                ))}
+                {WEEKDAYS.map((day, dayIndex) =>
+                  positionedByDay.get(day)!.map(({ item: slot, lane, laneCount }) => {
+                    const width = 100 / laneCount;
+                    const left = width * lane;
+                    return (
+                      <div
+                        class={`class-block course-color-${courseColorIndex.get(slot.courseId)}${
+                          slot.hasConflict ? " has-conflict" : ""
+                        }`}
+                        style={`grid-column:${dayIndex + 2}; grid-row:${rowLine(slot.startMinutes)} / ${rowLine(slot.endMinutes)}; width:${width}%; margin-left:${left}%;`}
+                      >
+                        <span class="class-block-code">{slot.code}</span>
+                        <span class="class-block-meta">
+                          <span class="class-block-label">{slot.label}</span>
+                          {" · "}
+                          <span class="class-block-time">
+                            {formatTime(slot.startMinutes)}–{formatTime(slot.endMinutes)}
+                          </span>
+                        </span>
+                        {slot.hasConflict && <span class="class-block-conflict">⚠ Clash</span>}
+                      </div>
+                    );
+                  }),
+                )}
+              </div>
+            </div>
+          )
+        }
+      </section>
+
+      <section aria-labelledby="courses-heading" class="courses-section">
+        <h2 id="courses-heading">Your Courses</h2>
+        <div class="course-grid">
+          {
+            courseViews.map(({ course, options, selectedOptionId, conflictText }) => {
+              const selectedOption = selectedOptionId ? optionById.get(selectedOptionId)! : null;
+              return (
+                <section aria-labelledby={`course-${course.id}-heading`} class="course-card">
+                  <h2 id={`course-${course.id}-heading`}>
+                    {course.code} — {course.title}
+                  </h2>
+                  {selectedOption ? (
+                    <p class="current-selection">
+                      <span class="current-selection-label">Currently selected:</span>{" "}
+                      {selectedOption.label} · {selectedOption.day} {formatTime(selectedOption.startMinutes)}–
+                      {formatTime(selectedOption.endMinutes)}
+                      {selectedOption.location ? ` · ${selectedOption.location}` : ""}
+                    </p>
+                  ) : (
+                    <p class="current-selection current-selection-none">No class selected yet.</p>
+                  )}
+                  {conflictText && (
+                    <p role="status" class="conflict">
+                      ⚠ Conflicts with {conflictText}
+                    </p>
+                  )}
+                  <form method="post" action="/api/selections" id={`select-form-${course.id}`} class="option-form">
+                    <input type="hidden" name="courseId" value={course.id} />
+                    <fieldset>
+                      <legend>Choose a class for {course.code}</legend>
+                      {options.map((option) => (
+                        <div class="option">
+                          <input
+                            type="radio"
+                            id={`option-${option.id}`}
+                            name="classOptionId"
+                            value={option.id}
+                            checked={option.id === selectedOptionId}
+                          />
+                          <label for={`option-${option.id}`}>
+                            {option.type === "lab" ? "Lab" : "Tutorial"} — {option.label}: {option.day}{" "}
+                            {formatTime(option.startMinutes)}–{formatTime(option.endMinutes)}
+                            {option.location ? ` · ${option.location}` : ""}
+                          </label>
+                        </div>
+                      ))}
+                    </fieldset>
+                  </form>
+                  {selectedOptionId && (
+                    <form method="post" action="/api/selections/remove" id={`remove-form-${course.id}`} class="remove-form">
+                      <input type="hidden" name="courseId" value={course.id} />
+                    </form>
+                  )}
+                  <div class="course-actions">
+                    <button form={`select-form-${course.id}`} class="btn btn-primary">
+                      {selectedOptionId ? "Change selection" : "Save selection"}
+                      <span class="sr-only"> for {course.code}</span>
+                    </button>
+                    {selectedOptionId && (
+                      <button form={`remove-form-${course.id}`} class="btn btn-secondary">
+                        Remove<span class="sr-only"> selection for {course.code}</span>
+                      </button>
+                    )}
+                  </div>
+                </section>
+              );
+            })
+          }
+        </div>
+      </section>
     </main>
     <script>
       // Other open tabs hear about a select/change/remove over the SSE
